@@ -50,13 +50,27 @@ def clean_html(text):
     return re.sub(r'<[^>]+>', '', text)
 
 def fetch_fifa_news(api_key):
-    models = ["gemini-2.5-flash", "gemini-1.5-flash"]
+    models = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
+    
+    # Instruct the model to return its response in JSON format.
+    # We do NOT use responseMimeType in the API configuration because 
+    # it is incompatible with Google Search grounding.
+    prompt_with_instructions = (
+        PROMPT + 
+        "\n\nIMPORTANT: You must return your response EXACTLY as a valid JSON object. "
+        "Do not include any other conversational text or explanations. Return it in this format:\n"
+        "{\n"
+        "  \"status\": \"POST\" or \"SKIP\",\n"
+        "  \"post_content\": \"HTML formatted telegram post (use <b>, <i>, etc. Keep under 950 chars)\",\n"
+        "  \"image_prompt\": \"Detailed description for image generation\"\n"
+        "}"
+    )
     
     payload = {
         "contents": [
             {
                 "parts": [
-                    {"text": PROMPT}
+                    {"text": prompt_with_instructions}
                 ]
             }
         ],
@@ -64,8 +78,6 @@ def fetch_fifa_news(api_key):
             {"google_search": {}}
         ],
         "generationConfig": {
-            "responseMimeType": "application/json",
-            "responseSchema": SCHEMA,
             "temperature": 0.7
         }
     }
@@ -82,36 +94,10 @@ def fetch_fifa_news(api_key):
         except Exception as e:
             print(f"Model {model} request failed with error: {e}")
             
-    # Fallback request without responseSchema (in case of schema constraints with tools in API)
-    print("Attempting fallback request without responseSchema...")
-    payload_fallback = {
-        "contents": [
-            {
-                "parts": [
-                    {"text": PROMPT + "\n\nYou MUST return the response as a valid JSON object matching the JSON schema format described above."}
-                ]
-            }
-        ],
-        "tools": [
-            {"google_search": {}}
-        ],
-        "generationConfig": {
-            "responseMimeType": "application/json",
-            "temperature": 0.7
-        }
-    }
-    for model in models:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
-        try:
-            response = requests.post(url, json=payload_fallback, timeout=30)
-            if response.status_code == 200:
-                return response.json()
-        except Exception as e:
-            print(f"Fallback model {model} failed: {e}")
-            
     raise Exception("All Gemini API generation attempts failed.")
 
 def parse_gemini_response(resp_json):
+    text = ""
     try:
         candidates = resp_json.get("candidates", [])
         if not candidates:
@@ -119,16 +105,22 @@ def parse_gemini_response(resp_json):
         
         text = candidates[0]["content"]["parts"][0]["text"]
         text_clean = text.strip()
-        if text_clean.startswith("```json"):
-            text_clean = text_clean[7:]
-        if text_clean.endswith("```"):
-            text_clean = text_clean[:-3]
-        text_clean = text_clean.strip()
         
+        # Extract JSON from markdown blocks if present
+        if "```json" in text_clean:
+            match = re.search(r"```json\s*(.*?)\s*```", text_clean, re.DOTALL)
+            if match:
+                text_clean = match.group(1)
+        elif "```" in text_clean:
+            match = re.search(r"```\s*(.*?)\s*```", text_clean, re.DOTALL)
+            if match:
+                text_clean = match.group(1)
+                
+        text_clean = text_clean.strip()
         return json.loads(text_clean)
     except Exception as e:
         print(f"Error parsing Gemini response: {e}")
-        print(f"Raw response structure: {json.dumps(resp_json, indent=2)[:500]}...")
+        print(f"Raw response text: {text}")
         raise
 
 def generate_image(api_key, prompt):
