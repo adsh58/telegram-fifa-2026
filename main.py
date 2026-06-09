@@ -38,11 +38,11 @@ FOCUS_TOPICS = [
 
 PROMPT_TEMPLATE = (
     "You are a professional sports journalist and social media manager specializing in international soccer/football.\n"
-    "Search for the latest news, updates, announcements, or key details about the upcoming FIFA World Cup 2026, specifically focusing on this area: {selected_topic}.\n\n"
+    "{search_instruction}\n\n"
     "To prevent repeating information that has already been posted, here are the topics/headlines of recently published posts:\n"
     "{history_text}\n\n"
-    "DO NOT repeat or write about the exact same stories or headlines listed in the history. Focus on new details, different teams/cities, or an entirely fresh perspective based on the current search.\n\n"
-    "Based on your search findings:\n"
+    "DO NOT repeat or write about the exact same stories or headlines listed in the history. Focus on new details, different teams/cities, or an entirely fresh perspective.\n\n"
+    "Based on your findings:\n"
     "1. Determine if there is new, interesting, or noteworthy information to share. If there is no new info, or if the news is repetitive/stale compared to the history, set the status to 'SKIP'.\n"
     "2. If there is news, set the status to 'POST' and write a high-quality, engaging, and easy-to-understand Telegram post in 'post_content'.\n"
     "   - Use bold uppercase headers and emojis to make it look premium (e.g. <b>🚨 WORLD CUP 2026 BUZZ 🚨</b> or <b>WC2026 INSIDER REPORT! ⚡</b>).\n"
@@ -147,17 +147,25 @@ def make_request_with_retries(url, payload, max_retries=3):
                 raise
     return None
 
-def fetch_fifa_news(api_key, selected_topic, history_list):
-    # Robust selection of models including stable fallbacks
+def fetch_fifa_news_impl(api_key, selected_topic, history_list, use_grounding=True):
+    # Expanded list of models, including stable fallback options
     models = [
         "gemini-2.5-flash",
         "gemini-2.0-flash",
         "gemini-1.5-pro",
-        "gemini-1.5-flash-latest"
+        "gemini-1.5-flash"
     ]
     
     history_text = "\n".join([f"- {h}" for h in history_list]) if history_list else "No previous posts."
-    prompt = PROMPT_TEMPLATE.format(selected_topic=selected_topic, history_text=history_text)
+    
+    if use_grounding:
+        search_instruction = f"Search for the latest news, updates, announcements, or key details about the upcoming FIFA World Cup 2026, specifically focusing on this area: {selected_topic}."
+        tools = [{"google_search": {}}]
+    else:
+        search_instruction = f"Retrieve facts, news details, or interesting updates from your training data and knowledge base about the upcoming FIFA World Cup 2026, specifically focusing on this area: {selected_topic}."
+        tools = []
+        
+    prompt = PROMPT_TEMPLATE.format(search_instruction=search_instruction, history_text=history_text)
     
     # Instruct the model to return its response in JSON format.
     prompt_with_instructions = (
@@ -180,29 +188,40 @@ def fetch_fifa_news(api_key, selected_topic, history_list):
                 ]
             }
         ],
-        "tools": [
-            {"google_search": {}}
-        ],
         "generationConfig": {
             "temperature": 0.7
         }
     }
-    
+    if tools:
+        payload["tools"] = tools
+        
     for model in models:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
         try:
-            print(f"Attempting to fetch news using model: {model}...")
+            print(f"Attempting to fetch news using model: {model} (Grounding: {use_grounding})...")
             response = make_request_with_retries(url, payload)
-            if response and response.status_code == 200:
+            
+            # CRITICAL: In requests library, response evaluates to False if status code is not 200
+            # So we must verify 'response is not None' explicitly to avoid skipping log details
+            if response is not None and response.status_code == 200:
                 return response.json()
-            elif response:
+            elif response is not None:
                 print(f"Model {model} failed with status code {response.status_code}: {response.text}")
             else:
                 print(f"Model {model} failed (no response received).")
         except Exception as e:
             print(f"Model {model} request failed with error: {e}")
             
-    raise Exception("All Gemini API generation attempts failed after retries.")
+    raise Exception(f"All Gemini API generation attempts failed (Grounding: {use_grounding}).")
+
+def fetch_fifa_news(api_key, selected_topic, history_list):
+    try:
+        # Try fetching with search grounding
+        return fetch_fifa_news_impl(api_key, selected_topic, history_list, use_grounding=True)
+    except Exception as e:
+        print(f"Failed to fetch news with Search Grounding: {e}")
+        print("Attempting fallback to fetch news WITHOUT Search Grounding...")
+        return fetch_fifa_news_impl(api_key, selected_topic, history_list, use_grounding=False)
 
 def parse_gemini_response(resp_json):
     text = ""
