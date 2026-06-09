@@ -10,10 +10,14 @@ on:
 jobs:
   run-automation:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write  # Crucial to allow committing and pushing the history file back to the repo
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Fetch all history for cleaner git operations
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -31,3 +35,11 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python main.py
+
+      - name: Commit and push history update
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add post_history.txt || true
+          git commit -m "chore: update post history [skip ci]" || true
+          git push || true

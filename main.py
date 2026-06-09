@@ -3,40 +3,43 @@ import sys
 import json
 import base64
 import re
+import random
 import requests
 
-PROMPT = (
-    "You are a professional sports journalist and social media manager specializing in international soccer/football.\n"
-    "Search for the latest news, updates, announcements, or key details about the upcoming FIFA World Cup 2026 (such as qualifier results, host cities, stadium preparations, tournament format, dates, or other major news).\n\n"
-    "Based on your search findings:\n"
-    "1. Determine if there is new, interesting, or noteworthy information to share. If there is no new info, or if the news is repetitive/stale since your last update, set the status to 'SKIP'.\n"
-    "2. If there is news, set the status to 'POST' and write a high-quality, engaging, and easy-to-understand Telegram post in 'post_content'.\n"
-    "   - Use bullet points and emojis to make it visually appealing.\n"
-    "   - Use relevant hashtags (e.g., #FIFA2026, #WorldCup, #Soccer, #Football).\n"
-    "   - Style the text using ONLY these Telegram-supported HTML tags: <b>bold</b>, <i>italic</i>, <u>underline</u>, <s>strikethrough</s>, <code class=\"\">code</code>, and <a href=\"...\">links</a>. Do NOT use markdown (like **bold** or *italic*) inside 'post_content'. Ensure all HTML tags are correctly opened and closed.\n"
-    "   - Keep the content length strictly under 950 characters (including hashtags and emojis) to ensure it fits in a Telegram photo caption.\n"
-    "3. Generate a detailed, descriptive prompt for Imagen 3 in 'image_prompt'. It should describe a high-quality, compelling, and relevant image matching the post (e.g., 'Concept art of a vibrant soccer stadium in North America filled with fans wearing flags, dramatic lighting, professional sports photography' or 'A soccer ball with the flags of USA, Canada, and Mexico painted on it, resting on a pristine green grass field under a sunny sky, high detail'). Avoid generic quality words like 'photorealistic'."
-)
+# Persistent history file to avoid repeating news topics
+HISTORY_FILE = "post_history.txt"
 
-SCHEMA = {
-    "type": "OBJECT",
-    "properties": {
-        "status": {
-            "type": "STRING",
-            "enum": ["POST", "SKIP"],
-            "description": "Whether to post new content or skip."
-        },
-        "post_content": {
-            "type": "STRING",
-            "description": "The HTML formatted post content. Max 950 characters."
-        },
-        "image_prompt": {
-            "type": "STRING",
-            "description": "A detailed image generation prompt for the news post."
-        }
-    },
-    "required": ["status", "post_content", "image_prompt"]
-}
+# Rotating topics to search for different areas of FIFA 2026
+FOCUS_TOPICS = [
+    "latest qualifiers status, continental matches highlights and team standings worldwide for World Cup 2026",
+    "host cities spotlight (like Toronto, Vancouver, Mexico City, Guadalajara, Monterrey, Miami, Seattle, New York, etc.) and stadium construction/renovation progress",
+    "tournament format updates (48 teams, 12 groups of 4, number of matches, knockout stage details, match schedule)",
+    "rising young soccer stars and top ballers expected to shine in 2026, their current club/national form and stats",
+    "tactical shifts, soccer formations (like 3-4-3 or 4-3-3), and coaching strategies being prepared for the World Cup",
+    "ticketing details, volunteer registration, fan zones plans, and local host committee announcements",
+    "historical milestones and trivia connecting host countries (USA, Canada, Mexico) to past World Cup tournaments",
+    "CONCACAF, UEFA, CONMEBOL, AFC, CAF qualifiers highlights, group draws, and key upcoming qualification matches"
+]
+
+PROMPT_TEMPLATE = (
+    "You are a professional sports journalist and social media manager specializing in international soccer/football.\n"
+    "Search for the latest news, updates, announcements, or key details about the upcoming FIFA World Cup 2026, specifically focusing on this area: {selected_topic}.\n\n"
+    "To prevent repeating information that has already been posted, here are the topics/headlines of recently published posts:\n"
+    "{history_text}\n\n"
+    "DO NOT repeat or write about the exact same stories or headlines listed in the history. Focus on new details, different teams/cities, or an entirely fresh perspective based on the current search.\n\n"
+    "Based on your search findings:\n"
+    "1. Determine if there is new, interesting, or noteworthy information to share. If there is no new info, or if the news is repetitive/stale compared to the history, set the status to 'SKIP'.\n"
+    "2. If there is news, set the status to 'POST' and write a high-quality, engaging, and easy-to-understand Telegram post in 'post_content'.\n"
+    "   - Use bold uppercase headers and emojis to make it look premium (e.g. <b>🚨 WORLD CUP 2026 BUZZ 🚨</b> or <b>WC2026 INSIDER REPORT! ⚡</b>).\n"
+    "   - Structure it with bullet points using '*' and bold introductory words (e.g., '* <b>A young gun phenom</b> is on...').\n"
+    "   - Make it read dynamically and cleanly, with a conversational, high-quality tone.\n"
+    "   - Ask an engaging question at the end to prompt response/discussion.\n"
+    "   - Use space-separated hashtags at the very end of the post (e.g., #WC2026 #FootballHype #RoadTo2026).\n"
+    "   - Style the text using ONLY these Telegram-supported HTML tags: <b>bold</b>, <i>italic</i>, <u>underline</u>, <s>strikethrough</s>, <code>code</code>, and <a href=\"...\">links</a>. Do NOT use markdown (like **bold** or *italic*) inside 'post_content'. Ensure all HTML tags are correctly opened and closed.\n"
+    "   - Keep the content length strictly under 950 characters (including hashtags and emojis) to ensure it fits in a Telegram photo caption.\n"
+    "3. Generate a detailed, descriptive prompt for Imagen 3 in 'image_prompt' representing a beautiful visual for this post. Avoid generic quality words like 'photorealistic'. It must be in English.\n"
+    "4. Return a short, 1-sentence summary of the main headline or topic of this post in 'headline_summary' (max 60 characters) so we can add it to the history list."
+)
 
 def get_env_var(name):
     val = os.environ.get(name)
@@ -49,20 +52,43 @@ def clean_html(text):
     # Strip HTML tags in case Telegram rejects the message formatting
     return re.sub(r'<[^>]+>', '', text)
 
-def fetch_fifa_news(api_key):
+def load_history():
+    if os.path.exists(HISTORY_FILE):
+        try:
+            with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+                return [line.strip() for line in f if line.strip()]
+        except Exception as e:
+            print(f"Error loading history: {e}")
+    return []
+
+def save_history(history_list, new_entry):
+    history_list.append(new_entry)
+    # Keep only the last 10 entries
+    history_list = history_list[-10:]
+    try:
+        with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+            for entry in history_list:
+                f.write(entry + "\n")
+        print("Updated history file successfully.")
+    except Exception as e:
+        print(f"Error saving history: {e}")
+
+def fetch_fifa_news(api_key, selected_topic, history_list):
     models = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
     
+    history_text = "\n".join([f"- {h}" for h in history_list]) if history_list else "No previous posts."
+    prompt = PROMPT_TEMPLATE.format(selected_topic=selected_topic, history_text=history_text)
+    
     # Instruct the model to return its response in JSON format.
-    # We do NOT use responseMimeType in the API configuration because 
-    # it is incompatible with Google Search grounding.
     prompt_with_instructions = (
-        PROMPT + 
+        prompt + 
         "\n\nIMPORTANT: You must return your response EXACTLY as a valid JSON object. "
         "Do not include any other conversational text or explanations. Return it in this format:\n"
         "{\n"
         "  \"status\": \"POST\" or \"SKIP\",\n"
-        "  \"post_content\": \"HTML formatted telegram post (use <b>, <i>, etc. Keep under 950 chars)\",\n"
-        "  \"image_prompt\": \"Detailed description for image generation\"\n"
+        "  \"post_content\": \"HTML formatted telegram post\",\n"
+        "  \"image_prompt\": \"Detailed description for image generation\",\n"
+        "  \"headline_summary\": \"Short 1-sentence summary of this post\"\n"
         "}"
     )
     
@@ -127,27 +153,22 @@ def generate_image(api_key, prompt):
     models = ["imagen-3.0-generate-002", "imagen-3.0-generate-001"]
     
     for model in models:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:predict?key={api_key}"
+        # Correct URL mapping for AI Studio image generation (generateImages method)
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateImages?key={api_key}"
         payload = {
-            "instances": [
-                {
-                    "prompt": prompt
-                }
-            ],
-            "parameters": {
-                "sampleCount": 1,
-                "aspectRatio": "1:1",
-                "outputMimeType": "image/jpeg"
-            }
+            "prompt": prompt,
+            "numberOfImages": 1,
+            "aspectRatio": "1:1",
+            "outputMimeType": "image/jpeg"
         }
         try:
             print(f"Attempting to generate image using model: {model}...")
             response = requests.post(url, json=payload, timeout=45)
             if response.status_code == 200:
                 resp_json = response.json()
-                predictions = resp_json.get("predictions", [])
-                if predictions and "bytesBase64Encoded" in predictions[0]:
-                    img_b64 = predictions[0]["bytesBase64Encoded"]
+                generated_images = resp_json.get("generatedImages", [])
+                if generated_images and "image" in generated_images[0] and "imageBytes" in generated_images[0]["image"]:
+                    img_b64 = generated_images[0]["image"]["imageBytes"]
                     return base64.b64decode(img_b64)
                 else:
                     print(f"Unexpected prediction response format: {resp_json}")
@@ -262,9 +283,16 @@ def main():
     tg_token = get_env_var("TELEGRAM_BOT_TOKEN")
     tg_chat_id = get_env_var("TELEGRAM_CHAT_ID")
     
+    # Load past history
+    history_list = load_history()
+    
+    # Pick a random topic to force query diversification
+    selected_topic = random.choice(FOCUS_TOPICS)
+    print(f"Chosen topic focus for this run: '{selected_topic}'")
+    
     print("Fetching FIFA 2026 news from Gemini API...")
     try:
-        resp = fetch_fifa_news(gemini_key)
+        resp = fetch_fifa_news(gemini_key, selected_topic, history_list)
         parsed_data = parse_gemini_response(resp)
     except Exception as e:
         print(f"Error during Gemini news retrieval: {e}")
@@ -279,6 +307,7 @@ def main():
         
     post_content = parsed_data.get("post_content", "").strip()
     image_prompt = parsed_data.get("image_prompt", "").strip()
+    headline_summary = parsed_data.get("headline_summary", "").strip()
     
     if not post_content:
         print("Warning: post_content is empty. Exiting...")
@@ -295,6 +324,10 @@ def main():
     if not success:
         print("Failed to post message to Telegram.")
         sys.exit(1)
+        
+    # Save the headline summary to history to prevent future repetition
+    if headline_summary:
+        save_history(history_list, headline_summary)
         
     print("Automation run completed successfully!")
 
