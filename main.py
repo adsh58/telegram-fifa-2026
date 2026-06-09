@@ -1,7 +1,6 @@
 import os
 import sys
 import json
-import base64
 import re
 import random
 import time
@@ -9,6 +8,21 @@ import requests
 
 # Persistent history file to avoid repeating news topics
 HISTORY_FILE = "post_history.txt"
+
+# Curated pool of professional soccer and stadium images
+IMAGE_POOL = {
+    "stadium_sunset": "https://images.unsplash.com/photo-1522771739844-6a9f6d5f14af?auto=format&fit=crop&w=1200&q=80",
+    "stadium_pitch": "https://images.unsplash.com/photo-1517649763962-0c623066013b?auto=format&fit=crop&w=1200&q=80",
+    "soccer_ball_grass": "https://images.unsplash.com/photo-1508098682722-e99c43a406b2?auto=format&fit=crop&w=1200&q=80",
+    "goal_moment": "https://images.unsplash.com/photo-1551958219-acbc608c6377?auto=format&fit=crop&w=1200&q=80",
+    "soccer_field_aerial": "https://images.unsplash.com/photo-1574629810360-7efbbe195018?auto=format&fit=crop&w=1200&q=80",
+    "fans_celebrating": "https://images.unsplash.com/photo-1510563800743-aed2364902b8?auto=format&fit=crop&w=1200&q=80",
+    "action_shot": "https://images.unsplash.com/photo-1504155611831-7214b4686d26?auto=format&fit=crop&w=1200&q=80",
+    "field_close_up": "https://images.unsplash.com/photo-1431324155629-1a6edd1796b5?auto=format&fit=crop&w=1200&q=80",
+    "sunset_pitch": "https://images.unsplash.com/photo-1518063319789-7217e6706b04?auto=format&fit=crop&w=1200&q=80",
+    "boots_and_ball": "https://images.unsplash.com/photo-1568194157720-8eae79a37bac?auto=format&fit=crop&w=1200&q=80",
+    "training_ground": "https://images.unsplash.com/photo-1516222338250-863216ce01fa?auto=format&fit=crop&w=1200&q=80"
+}
 
 # Rotating topics to search for different areas of FIFA 2026
 FOCUS_TOPICS = [
@@ -38,7 +52,18 @@ PROMPT_TEMPLATE = (
     "   - Use space-separated hashtags at the very end of the post (e.g., #WC2026 #FootballHype #RoadTo2026).\n"
     "   - Style the text using ONLY these Telegram-supported HTML tags: <b>bold</b>, <i>italic</i>, <u>underline</u>, <s>strikethrough</s>, <code>code</code>, and <a href=\"...\">links</a>. Do NOT use markdown (like **bold** or *italic*) inside 'post_content'. Ensure all HTML tags are correctly opened and closed.\n"
     "   - Keep the content length strictly under 950 characters (including hashtags and emojis) to ensure it fits in a Telegram photo caption.\n"
-    "3. Generate a detailed, descriptive prompt for Imagen 3 in 'image_prompt' representing a beautiful visual for this post. Avoid generic quality words like 'photorealistic'. It must be in English.\n"
+    "3. Select the best matching image from the following options for the post content and return its key in 'image_key':\n"
+    "   - 'stadium_sunset': A modern stadium grandstand at sunset.\n"
+    "   - 'stadium_pitch': An illuminated stadium pitch with spotlights.\n"
+    "   - 'soccer_ball_grass': A professional soccer ball resting on green grass.\n"
+    "   - 'goal_moment': A soccer ball hitting the back of the net.\n"
+    "   - 'soccer_field_aerial': Aerial view of a lush green soccer field.\n"
+    "   - 'fans_celebrating': Excited fans celebrating in a stadium.\n"
+    "   - 'action_shot': A player kick action shot vibe.\n"
+    "   - 'field_close_up': A close-up of grass and a corner flag.\n"
+    "   - 'sunset_pitch': A local soccer field under a sunset sky.\n"
+    "   - 'boots_and_ball': A soccer ball and boots on artificial turf.\n"
+    "   - 'training_ground': Training session cones and soccer balls.\n"
     "4. Return a short, 1-sentence summary of the main headline or topic of this post in 'headline_summary' (max 60 characters) so we can add it to the history list."
 )
 
@@ -142,7 +167,7 @@ def fetch_fifa_news(api_key, selected_topic, history_list):
         "{\n"
         "  \"status\": \"POST\" or \"SKIP\",\n"
         "  \"post_content\": \"HTML formatted telegram post\",\n"
-        "  \"image_prompt\": \"Detailed description for image generation\",\n"
+        "  \"image_key\": \"Key of the selected image from the list\",\n"
         "  \"headline_summary\": \"Short 1-sentence summary of this post\"\n"
         "}"
     )
@@ -206,49 +231,19 @@ def parse_gemini_response(resp_json):
         print(f"Raw response text: {text}")
         raise
 
-def generate_image(api_key, prompt):
-    models = ["imagen-3.0-generate-002", "imagen-3.0-generate-001"]
-    
-    for model in models:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateImages?key={api_key}"
-        payload = {
-            "prompt": prompt,
-            "numberOfImages": 1,
-            "aspectRatio": "1:1",
-            "outputMimeType": "image/jpeg"
-        }
-        try:
-            print(f"Attempting to generate image using model: {model}...")
-            response = make_request_with_retries(url, payload)
-            if response and response.status_code == 200:
-                resp_json = response.json()
-                generated_images = resp_json.get("generatedImages", [])
-                if generated_images and "image" in generated_images[0] and "imageBytes" in generated_images[0]["image"]:
-                    img_b64 = generated_images[0]["image"]["imageBytes"]
-                    return base64.b64decode(img_b64)
-                else:
-                    print(f"Unexpected prediction response format: {resp_json}")
-            elif response:
-                print(f"Model {model} failed with status {response.status_code}: {response.text}")
-        except Exception as e:
-            print(f"Model {model} image generation failed: {e}")
-            
-    print("All image generation models failed or are not accessible with the provided key. Continuing without image.")
-    return None
-
-def send_to_telegram(bot_token, chat_id, text, image_bytes):
-    if image_bytes:
+def send_to_telegram(bot_token, chat_id, text, image_url):
+    if image_url:
         # Check if text fits inside the photo caption (limit is 1024 characters)
         if len(text) <= 1024:
             url = f"https://api.telegram.org/bot{bot_token}/sendPhoto"
-            files = {"photo": ("fifa2026.jpg", image_bytes, "image/jpeg")}
             data = {
                 "chat_id": chat_id,
+                "photo": image_url,
                 "caption": text,
                 "parse_mode": "HTML"
             }
-            print("Sending image with caption to Telegram...")
-            response = requests.post(url, files=files, data=data, timeout=30)
+            print(f"Sending image URL {image_url} with caption to Telegram...")
+            response = requests.post(url, json=data, timeout=30)
             
             # If the HTML parsing fails, fallback to sending stripped plain text
             if response.status_code == 400 and "can't parse entities" in response.text:
@@ -258,7 +253,7 @@ def send_to_telegram(bot_token, chat_id, text, image_bytes):
                     plain_text = plain_text[:1020] + "..."
                 data["caption"] = plain_text
                 data.pop("parse_mode", None)
-                response = requests.post(url, files=files, data=data, timeout=30)
+                response = requests.post(url, json=data, timeout=30)
                 
             if response.status_code == 200:
                 print("Successfully sent image with caption to Telegram.")
@@ -268,15 +263,15 @@ def send_to_telegram(bot_token, chat_id, text, image_bytes):
                 print("Falling back to sending photo and text separately...")
         
         # If caption is too long (>1024) or joint sending failed, send separately
-        # 1. Send the photo first with a generic placeholder
+        # 1. Send the photo first
         url = f"https://api.telegram.org/bot{bot_token}/sendPhoto"
-        files = {"photo": ("fifa2026.jpg", image_bytes, "image/jpeg")}
         data = {
             "chat_id": chat_id,
+            "photo": image_url,
             "caption": "⚽ FIFA World Cup 2026 Update! Details below 👇"
         }
         print("Sending photo to Telegram...")
-        photo_response = requests.post(url, files=files, data=data, timeout=30)
+        photo_response = requests.post(url, json=data, timeout=30)
         
         # 2. Send the full text as a reply or follow-up message
         url_msg = f"https://api.telegram.org/bot{bot_token}/sendMessage"
@@ -310,7 +305,7 @@ def send_to_telegram(bot_token, chat_id, text, image_bytes):
         else:
             print(f"Failed to send separate text: {response.status_code} - {response.text}")
             
-    # Text-only fallback (if image generation failed or was completely rejected)
+    # Text-only fallback (if image_url is None or photo sending completely failed)
     print("Sending text-only message to Telegram...")
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     data = {
@@ -362,21 +357,18 @@ def main():
         sys.exit(0)
         
     post_content = parsed_data.get("post_content", "").strip()
-    image_prompt = parsed_data.get("image_prompt", "").strip()
+    image_key = parsed_data.get("image_key", "soccer_ball_grass").strip()
     headline_summary = parsed_data.get("headline_summary", "").strip()
     
     if not post_content:
         print("Warning: post_content is empty. Exiting...")
         sys.exit(0)
         
-    image_bytes = None
-    if image_prompt:
-        print(f"Generating image with prompt: {image_prompt}")
-        image_bytes = generate_image(gemini_key, image_prompt)
-    else:
-        print("No image prompt was generated by the AI.")
+    # Get the image URL from our curated pool based on the AI's selection
+    image_url = IMAGE_POOL.get(image_key, IMAGE_POOL["soccer_ball_grass"])
+    print(f"Selected image URL: {image_url} (Key: {image_key})")
         
-    success = send_to_telegram(tg_token, tg_chat_id, post_content, image_bytes)
+    success = send_to_telegram(tg_token, tg_chat_id, post_content, image_url)
     if not success:
         print("Failed to post message to Telegram.")
         sys.exit(1)
