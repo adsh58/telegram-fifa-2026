@@ -4,6 +4,7 @@ import json
 import base64
 import re
 import random
+import time
 import requests
 
 # Persistent history file to avoid repeating news topics
@@ -73,8 +74,62 @@ def save_history(history_list, new_entry):
     except Exception as e:
         print(f"Error saving history: {e}")
 
+def make_request_with_retries(url, payload, max_retries=3):
+    """
+    Makes a POST request and retries on 429 (Rate Limit) or 503 (Unavailable) errors
+    with exponential backoff and respect for Google's retryDelay.
+    """
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(url, json=payload, timeout=30)
+            if response.status_code == 200:
+                return response
+            
+            # Check for temporary service issues or rate limits
+            if response.status_code in (429, 503):
+                wait_time = 10  # default wait time
+                try:
+                    # Attempt to parse Google's detailed rate limit retry delay
+                    resp_json = response.json()
+                    error_details = resp_json.get("error", {}).get("details", [])
+                    for detail in error_details:
+                        if "retryDelay" in detail:
+                            delay_str = detail["retryDelay"].replace("s", "")
+                            wait_time = int(float(delay_str)) + 1
+                            break
+                except Exception:
+                    pass
+                
+                # Check standard Retry-After header
+                if "Retry-After" in response.headers:
+                    try:
+                        wait_time = int(response.headers["Retry-After"])
+                    except Exception:
+                        pass
+                
+                # Apply backoff scaling on subsequent attempts
+                wait_time = wait_time * (attempt + 1)
+                print(f"Received status {response.status_code} on attempt {attempt+1}/{max_retries}. Retrying in {wait_time}s...")
+                time.sleep(wait_time)
+            else:
+                # Do not retry on permanent errors (400, 404, etc.)
+                return response
+        except requests.exceptions.RequestException as e:
+            print(f"Network error on attempt {attempt+1}/{max_retries}: {e}")
+            if attempt < max_retries - 1:
+                time.sleep(5)
+            else:
+                raise
+    return None
+
 def fetch_fifa_news(api_key, selected_topic, history_list):
-    models = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
+    # Robust selection of models including stable fallbacks
+    models = [
+        "gemini-2.5-flash",
+        "gemini-2.0-flash",
+        "gemini-1.5-pro",
+        "gemini-1.5-flash-latest"
+    ]
     
     history_text = "\n".join([f"- {h}" for h in history_list]) if history_list else "No previous posts."
     prompt = PROMPT_TEMPLATE.format(selected_topic=selected_topic, history_text=history_text)
@@ -112,15 +167,17 @@ def fetch_fifa_news(api_key, selected_topic, history_list):
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
         try:
             print(f"Attempting to fetch news using model: {model}...")
-            response = requests.post(url, json=payload, timeout=30)
-            if response.status_code == 200:
+            response = make_request_with_retries(url, payload)
+            if response and response.status_code == 200:
                 return response.json()
-            else:
+            elif response:
                 print(f"Model {model} failed with status code {response.status_code}: {response.text}")
+            else:
+                print(f"Model {model} failed (no response received).")
         except Exception as e:
             print(f"Model {model} request failed with error: {e}")
             
-    raise Exception("All Gemini API generation attempts failed.")
+    raise Exception("All Gemini API generation attempts failed after retries.")
 
 def parse_gemini_response(resp_json):
     text = ""
@@ -153,7 +210,6 @@ def generate_image(api_key, prompt):
     models = ["imagen-3.0-generate-002", "imagen-3.0-generate-001"]
     
     for model in models:
-        # Correct URL mapping for AI Studio image generation (generateImages method)
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateImages?key={api_key}"
         payload = {
             "prompt": prompt,
@@ -163,8 +219,8 @@ def generate_image(api_key, prompt):
         }
         try:
             print(f"Attempting to generate image using model: {model}...")
-            response = requests.post(url, json=payload, timeout=45)
-            if response.status_code == 200:
+            response = make_request_with_retries(url, payload)
+            if response and response.status_code == 200:
                 resp_json = response.json()
                 generated_images = resp_json.get("generatedImages", [])
                 if generated_images and "image" in generated_images[0] and "imageBytes" in generated_images[0]["image"]:
@@ -172,7 +228,7 @@ def generate_image(api_key, prompt):
                     return base64.b64decode(img_b64)
                 else:
                     print(f"Unexpected prediction response format: {resp_json}")
-            else:
+            elif response:
                 print(f"Model {model} failed with status {response.status_code}: {response.text}")
         except Exception as e:
             print(f"Model {model} image generation failed: {e}")
